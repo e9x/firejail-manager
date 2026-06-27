@@ -5,26 +5,6 @@ Manage local [firejail](https://firejail.wordpress.com/) sandboxes as VSCode rem
 ## Requirements
 
 - Linux with [firejail](https://firejail.wordpress.com/) installed and on your `$PATH` (or point `firejail.firejailPath` at the binary).
-- A VSCodium-compatible build of VSCode that supports remote authority resolvers.
-
-**Activation**
-
-> NOTE: Not needed in VSCodium since version 1.75
-
-Enable the extension in your `argv.json`:
-
-```json
-{
-    ...
-    "enable-proposed-api": [
-        ...,
-        "e9x.firejail-manager",
-    ]
-    ...
-}
-```
-
-which you can open by running the `Preferences: Configure Runtime Arguments` command. The file is located in `~/.vscode-oss/argv.json`.
 
 ## How it works
 

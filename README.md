@@ -1,92 +1,137 @@
-# Open Remote - SSH
+# Firejail Manager
 
-![Open Remote SSH](https://raw.githubusercontent.com/jeanp413/open-remote-ssh/master/docs/images/open-remote-ssh.gif)
-
-## SSH Host Requirements
-You can connect to a running SSH server on the following platforms.
-
-**Supported**:
-
-- x86_64 Debian 8+, Ubuntu 16.04+, CentOS / RHEL 7+ Linux
-- ARMv7l (AArch32) Raspbian Stretch/9+ (32-bit)
-- ARMv8l (AArch64) Ubuntu 18.04+ (64-bit)
-- IBM Z (s390x) Debian 13, RHEL 8+, Ubuntu 22.04+, SLES 15+
-- macOS 10.14+ (Mojave)
-- Windows 10+
-- FreeBSD 13+ (Requires custom serverDownloadUrlTemplate setting)
-- DragonFlyBSD (Requires manual remote-extension-host installation)
+Manage local [firejail](https://firejail.wordpress.com/) sandboxes as VSCode remote targets. Instead of connecting over SSH to another machine, this extension launches the VSCode remote server *inside* a firejail sandbox on your local machine and connects the editor to it — giving you a confined, configurable environment for opening folders and running code, without leaving your desktop.
 
 ## Requirements
+
+- Linux with [firejail](https://firejail.wordpress.com/) installed and on your `$PATH` (or point `firejail.firejailPath` at the binary).
+- A VSCodium-compatible build of VSCode that supports remote authority resolvers.
 
 **Activation**
 
 > NOTE: Not needed in VSCodium since version 1.75
 
-Enable the extension in your `argv.json`
-
+Enable the extension in your `argv.json`:
 
 ```json
 {
     ...
     "enable-proposed-api": [
         ...,
-        "jeanp413.open-remote-ssh",
+        "e9x.firejail-manager",
     ]
     ...
 }
 ```
-which you can open by running the `Preferences: Configure Runtime Arguments` command.
-The file is located in `~/.vscode-oss/argv.json`.
 
-**Alpine linux**
+which you can open by running the `Preferences: Configure Runtime Arguments` command. The file is located in `~/.vscode-oss/argv.json`.
 
-When running on alpine linux, the packages `libstdc++` and `bash` are necessary and can be installed via
-running
-```bash
-sudo apk add bash libstdc++
-```
+## How it works
 
-## SSH configuration file
+Each jail is a firejail sandbox definition. When you connect, the extension:
 
-[OpenSSH](https://www.openssh.com/) supports using a [configuration file](https://linuxize.com/post/using-the-ssh-config-file/) to store all your different SSH connections. To use an SSH config file, run the `Remote-SSH: Open SSH Configuration File...` command.
+1. Builds a `firejail` command line from the jail's configuration (see [Jail configuration](#jail-configuration)).
+2. Downloads and installs the matching VSCode remote server inside the sandbox.
+3. Starts the server and connects the editor to it.
 
-## Note for VSCode-OSS users
+By default the server listens on a Unix socket inside the jail's private directory, so jails can run with no network namespace at all (e.g. `--net=none`). If you assign the jail its own network namespace, the server is reached over `127.0.0.1` instead. Firejail uses the host network by default, in which case no port forwarding is needed.
 
-If you are using VSCode-OSS instead of VSCodium, you need some extra steps to make it work.
+## Getting started
 
-Modify the following entries in the plugin settings:
+1. Open the **Remote Explorer** and find the **Firejail Jails** view, or run **Firejail: Connect to Jail...** from the Command Palette.
+2. Add a jail with the **+** button in the view title. You'll be asked for a name and a private home directory.
+3. Select the jail to open it in a new window (or use **Firejail: Connect Current Window to Jail...**).
 
-```
-"remote.SSH.serverBinaryName": "codium-server",
-"remote.SSH.serverDownloadUrlTemplate": "https://github.com/VSCodium/vscodium/releases/download/${version}${release}/vscodium-reh-${os}-${arch}-${version}${release}.tar.gz",
-"remote.SSH.serverVersion": "latest",
-"remote.SSH.serverValidation": "force",
-```
+## Commands
 
-VSCodium versions have an extra `release` part that do not have equivalent for VSCode-OSS.
-So leaving `serverVersion` to the default `"match"` will fail.
-The plugin will install the latest release of VSCodium if `serverVersion` is set to `"latest"`.
-If you need to match the VSCode-OSS version, set `serverVersion` to `"closest"`, to
-automatically fetch the last release of VSCodium for this version.
+- **Firejail: Connect to Jail...** — pick a jail and open it in a new window.
+- **Firejail: Connect Current Window to Jail...** — connect the current window to a jail.
+- **Firejail: Open Jails Config File...** — open the `jails.json` store in the editor.
+- **Firejail: Show Log** — open the extension's output log.
 
-You can look for the release numbers associated with your VSCode version in the
-[release page](https://github.com/VSCodium/vscodium/releases/). For instance, for VSCode
-version "1.96.0", the (last) VSCodium release number is "24352".
+The **Firejail Jails** view in the Remote Explorer also provides per-jail actions: add, configure, edit, refresh, remove, and open in a new or current window.
 
-You can also set `serverVersion` to a specic version (e.g. "1.116.0") or a specific
-version-release (e.g. "1.116.02821").
+## Jail configuration
 
-If the local and remote VSCodium versions don't match, which will be the case on VSCode-OSS,
-remote server validation needs to be bypassed. Setting `serverValidation` to `"force"` will
-modify the commit of the remote server to make it match the local VSCode commit.
-If `serverValidation` is set to `"skip"`, the remote server will skip checking that the commits
-match. This option is working only if the remote VSCodium version is `>=1.120`.
+Jails are stored in a `jails.json` file. By default this lives in the extension's global storage; set `firejail.configFile` to use a path of your own (`~` is expanded). The file is an array of jail objects validated against [`resources/jails.schema.json`](resources/jails.schema.json), so you get completion and validation when editing it.
 
-Starting with VSCodium version 1.99.0, the `release` number is not separated from the `version` by a dot `.` anymore.
-Therefore `serverDownloadUrlTemplate` needs to be filled with the new scheme (as shown above).
-
-Before 1.99.0, the old scheme needs to be used:
+A new jail defaults to the equivalent of:
 
 ```
-"remote.SSH.serverDownloadUrlTemplate": "https://github.com/VSCodium/vscodium/releases/download/${version}.${release}/vscodium-reh-${os}-${arch}-${version}.${release}.tar.gz",
+firejail --private=DIR --private-tmp --noprofile
 ```
+
+### Required fields
+
+- `name` — unique jail name (no whitespace or path separators).
+- `privateDir` — private home directory for the jail (`firejail --private=DIR`). Supports `~` expansion.
+
+### Common fields
+
+- `privateTmp` (default `true`) — private, empty `/tmp` (`--private-tmp`).
+- `noprofile` (default `true`) — don't load any firejail security profile (`--noprofile`).
+
+### Networking
+
+- `net` — new network namespace on an interface (`--net=INTERFACE`).
+- `netns` — named network namespace (`--netns=NAME`).
+- `dns` — DNS server (`--dns=ADDRESS`).
+- `ip` — IP address in the new namespace (`--ip=ADDRESS`).
+- `hostname` — jail hostname (`--hostname=NAME`).
+
+### Devices / IPC
+
+`nodbus`, `no3d`, `nosound`, `novideo`, `nodvd`, `notv`, `nou2f`, `noinput`, `privateDev` — map to the matching `firejail --no*` / `--private-dev` flags.
+
+### Security
+
+`nonewprivs`, `noroot`, `seccomp`, `capsDropAll` (`--caps.drop=all`), `apparmor` — map to the matching firejail hardening flags.
+
+### Filesystem
+
+`privateCache`, `disableMnt`, `writableVar`, `writableVarLog`, `writableRunUser`, `keepDevShm`, `machineId` — map to the matching firejail mount/filesystem flags.
+
+### Resource limits
+
+- `timeout` — kill the jail after `hh:mm:ss` (`--timeout`).
+- `nice` — nice value for the jailed process (`--nice`).
+
+### Escape hatch
+
+- `extraArgs` — array of raw arguments appended to the `firejail` command line for anything not modelled above.
+
+## Settings
+
+- `firejail.configFile` — absolute path to `jails.json`. Defaults to the extension's global storage location.
+- `firejail.firejailPath` — path to the firejail binary. Defaults to `firejail` on `$PATH`.
+- `firejail.defaultExtensions` — extensions installed automatically inside every jail.
+- `firejail.useSocketPath` (default `true`) — have the server listen on a Unix socket in the jail's private directory instead of a TCP port on `127.0.0.1`. Lets jails run with no network namespace (e.g. `--net=none`).
+- `firejail.serverDownloadUrlTemplate` — URL template for the VSCode server download. Variables: `${quality}`, `${version}`, `${commit}`, `${arch}`, `${os}`, `${release}`.
+- `firejail.serverVersion` — `match` (default), `latest`, `closest`, or a specific version.
+- `firejail.serverValidation` — `strict` (default), `force`, or `skip`.
+- `firejail.serverBinaryName` — override the server binary name. Use only when your client has no matching server release.
+
+### Note for VSCode-OSS users
+
+If you are using VSCode-OSS instead of VSCodium, the server version won't match a VSCodium release out of the box. Adjust the server settings, for example:
+
+```json
+"firejail.serverBinaryName": "codium-server",
+"firejail.serverDownloadUrlTemplate": "https://github.com/VSCodium/vscodium/releases/download/${version}${release}/vscodium-reh-${os}-${arch}-${version}${release}.tar.gz",
+"firejail.serverVersion": "latest",
+"firejail.serverValidation": "force",
+```
+
+VSCodium releases carry an extra `release` part with no VSCode-OSS equivalent, so leaving `serverVersion` at the default `match` will fail. Set it to `latest` to install the latest VSCodium release, or to `closest` to fetch the last VSCodium release for your VSCode version. You can also pin a specific version (e.g. `1.116.0`) or version-release (e.g. `1.116.02821`). Release numbers are listed on the [VSCodium releases page](https://github.com/VSCodium/vscodium/releases/).
+
+When local and remote versions don't match (as on VSCode-OSS), server validation must be relaxed. `force` rewrites the remote server commit to match the local VSCode commit; `skip` skips the commit check entirely (requires remote VSCodium `>=1.120`).
+
+Starting with VSCodium 1.99.0 the `release` number is no longer separated from `version` by a dot, so the download template uses `${version}${release}` as shown above. Before 1.99.0 use the old dotted scheme:
+
+```json
+"firejail.serverDownloadUrlTemplate": "https://github.com/VSCodium/vscodium/releases/download/${version}.${release}/vscodium-reh-${os}-${arch}-${version}.${release}.tar.gz",
+```
+
+## License
+
+See [LICENSE.txt](LICENSE.txt).

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { isNullable } from '@zokugun/is-it-type';
 import Log from './common/logger';
-import JailStore, { buildFirejailArgs } from './jail/jailConfig';
+import JailStore, { buildFirejailArgs, usesHostNetwork } from './jail/jailConfig';
 import JailConnection from './jail/jailConnection';
 import { installCodeServer, ServerInstallError } from './serverSetup';
 import { ServerVersion } from './serverConfig';
@@ -15,6 +15,13 @@ export function getRemoteAuthority(jailName: string) {
 export class FirejailResolver implements vscode.RemoteAuthorityResolver, vscode.Disposable {
 
     private labelFormatterDisposable: vscode.Disposable | undefined;
+    tunnelFactory?: vscode.RemoteAuthorityResolver['tunnelFactory'];
+
+    // Whether the jail resolved in this window shares the host network
+    // namespace. A resolver instance lives in a single window's UI extension
+    // host and only ever resolves that window's authority, so a single flag is
+    // sufficient. Consulted by showCandidatePort to suppress auto-forwarding.
+    private hostNetwork = false;
 
     constructor(
         readonly context: vscode.ExtensionContext,
@@ -63,8 +70,15 @@ export class FirejailResolver implements vscode.RemoteAuthorityResolver, vscode.
                     this.logger
                 );
 
-                // Enable ports view
-                vscode.commands.executeCommand('setContext', 'forwardedPortsViewEnabled', true);
+                // Enable the ports view only when the jail has its own network
+                // namespace. On the host network the server is reachable directly
+                // at 127.0.0.1, so port forwarding is unnecessary.
+                this.hostNetwork = usesHostNetwork(jail);
+                this.tunnelFactory = this.hostNetwork ? (tunnelOptions) => {
+                    this.logger.trace(`Ignoring port forward request for host-network jail: ${tunnelOptions.remoteAddress.host}:${tunnelOptions.remoteAddress.port}`);
+                    return undefined;
+                } : undefined;
+                vscode.commands.executeCommand('setContext', 'forwardedPortsViewEnabled', !this.hostNetwork);
 
                 this.labelFormatterDisposable?.dispose();
                 this.labelFormatterDisposable = vscode.workspace.registerResourceLabelFormatter({

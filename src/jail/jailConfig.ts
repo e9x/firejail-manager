@@ -65,6 +65,16 @@ export function buildFirejailArgs(jail: JailConfiguration): string[] {
     return args;
 }
 
+/**
+ * Whether the jail shares the host network namespace. Firejail uses the host
+ * network by default; it only gets its own namespace when an explicit
+ * `--net=` or `--netns=` option is passed. When on the host network the server
+ * is reachable directly at 127.0.0.1, so port forwarding is not needed.
+ */
+export function usesHostNetwork(jail: JailConfiguration): boolean {
+    return !jail.extraArgs.some(arg => arg === '--net' || arg.startsWith('--net=') || arg === '--netns' || arg.startsWith('--netns='));
+}
+
 function normalizeJail(raw: Partial<JailConfiguration> & { name: string; privateDir: string }): JailConfiguration {
     return {
         name: raw.name,

@@ -2,7 +2,7 @@
 	"name": "firejail-manager",
 	"displayName": "Firejail Manager",
 	"description": "Manage local firejail sandboxes as VSCode remote targets.",
-	"version": "0.1.0",
+	"version": "1.0.0",
 	"author": "e9x",
 	"publisher": "e9x",
 	"repository": {

@@ -1,10 +1,13 @@
+import * as net from 'net';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { isNullable } from '@zokugun/is-it-type';
 import Log from './common/logger';
 import JailStore, { buildFirejailArgs, usesHostNetwork } from './jail/jailConfig';
 import JailConnection from './jail/jailConnection';
 import { installCodeServer, ServerInstallError } from './serverSetup';
-import { ServerVersion } from './serverConfig';
+import { getVSCodeServerConfig, ServerVersion } from './serverConfig';
+import { resolveHostServerDataDir } from './hostServerDownload';
 
 export const REMOTE_FIREJAIL_AUTHORITY = 'firejail';
 
@@ -41,6 +44,7 @@ export class FirejailResolver implements vscode.RemoteAuthorityResolver, vscode.
         const serverDownloadUrlTemplate = firejailConfig.get<string>('serverDownloadUrlTemplate');
         const serverVersion = firejailConfig.get<ServerVersion>('serverVersion', 'match');
         const defaultExtensions = firejailConfig.get<string[]>('defaultExtensions', []);
+        const useSocketPath = firejailConfig.get<boolean>('useSocketPath', true);
 
         return vscode.window.withProgress({
             title: `Setting up Firejail ${jailName}`,
@@ -65,9 +69,10 @@ export class FirejailResolver implements vscode.RemoteAuthorityResolver, vscode.
                     defaultExtensions,
                     [],
                     'linux',
-                    false,
+                    useSocketPath,
                     undefined,
-                    this.logger
+                    this.logger,
+                    jail
                 );
 
                 // Enable the ports view only when the jail has its own network
@@ -92,10 +97,31 @@ export class FirejailResolver implements vscode.RemoteAuthorityResolver, vscode.
                     }
                 });
 
+                const listeningOn = installResult.listeningOn;
+
+                if (useSocketPath) {
+                    // The server listens on a Unix socket inside the jail. Under
+                    // `firejail --private=DIR`, the jail's $HOME maps to DIR on the
+                    // host, so the jail-internal socket path
+                    // ($SERVER_DATA_DIR/.<commit>.sock) is reachable on the host by
+                    // rebasing it onto the jail's private dir. We bridge that socket
+                    // through a ManagedResolvedAuthority since ResolvedAuthority only
+                    // supports host+port.
+                    const vscodeServerConfig = await getVSCodeServerConfig();
+                    const hostDataDir = resolveHostServerDataDir(jail, vscodeServerConfig.serverDataFolderName, undefined);
+                    const socketName = path.basename(String(listeningOn));
+                    const hostSocketPath = path.join(hostDataDir, socketName);
+                    this.logger.info(`Connecting to jail server over Unix socket ${hostSocketPath}`);
+
+                    return new vscode.ManagedResolvedAuthority(
+                        () => connectToSocket(hostSocketPath, this.logger),
+                        installResult.connectionToken
+                    );
+                }
+
                 // The server listens on 127.0.0.1:<port> inside the jail; since the
                 // jail shares the host network namespace by default, we connect to it
                 // directly with no tunnel.
-                const listeningOn = installResult.listeningOn;
                 const port = typeof listeningOn === 'number' ? listeningOn : parseInt(String(listeningOn), 10);
                 if (isNullable(port) || Number.isNaN(port)) {
                     throw new ServerInstallError(`Server did not report a numeric listening port`);
@@ -130,4 +156,63 @@ export class FirejailResolver implements vscode.RemoteAuthorityResolver, vscode.
     dispose() {
         this.labelFormatterDisposable?.dispose();
     }
+}
+
+/**
+ * Open a Unix domain socket and adapt it to VS Code's ManagedMessagePassing
+ * interface, so a socket-listening jail server can be reached without a TCP
+ * port. Resolves once the socket is connected; rejects if the connection fails
+ * before it is established.
+ */
+function connectToSocket(socketPath: string, logger: Log): Promise<vscode.ManagedMessagePassing> {
+    return new Promise((resolve, reject) => {
+        const socket = net.createConnection(socketPath);
+
+        const onDidReceiveMessage = new vscode.EventEmitter<Uint8Array>();
+        const onDidClose = new vscode.EventEmitter<Error | undefined>();
+        const onDidEnd = new vscode.EventEmitter<void>();
+
+        let connected = false;
+        let settled = false;
+
+        socket.on('connect', () => {
+            connected = true;
+            settled = true;
+            resolve({
+                onDidReceiveMessage: onDidReceiveMessage.event,
+                onDidClose: onDidClose.event,
+                onDidEnd: onDidEnd.event,
+                send: (data: Uint8Array) => {
+                    socket.write(Buffer.from(data));
+                },
+                end: () => {
+                    socket.end();
+                },
+            });
+        });
+
+        socket.on('data', (data: Buffer) => {
+            onDidReceiveMessage.fire(new Uint8Array(data));
+        });
+
+        socket.on('error', (err: Error) => {
+            if (!settled) {
+                settled = true;
+                logger.error(`Failed to connect to jail server socket ${socketPath}`, err);
+                reject(err);
+            } else {
+                onDidClose.fire(err);
+            }
+        });
+
+        socket.on('end', () => {
+            onDidEnd.fire();
+        });
+
+        socket.on('close', () => {
+            if (connected) {
+                onDidClose.fire(undefined);
+            }
+        });
+    });
 }

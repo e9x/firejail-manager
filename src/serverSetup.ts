@@ -3,6 +3,8 @@ import Log from './common/logger';
 import { getVSCodeServerConfig, ServerVersion, ServerValidation } from './serverConfig';
 import JailConnection from './jail/jailConnection';
 import { fetchRelease, IRelease } from './fetchRelease';
+import { JailConfiguration } from './jail/jailConfig';
+import { downloadServerOnHost } from './hostServerDownload';
 
 function matchHostnamePattern(hostname: string, pattern: string): number {
     if (hostname === pattern) {
@@ -80,7 +82,8 @@ export async function installCodeServer(
     platform: string | undefined,
     useSocketPath: boolean,
     customInstallPath: string | undefined,
-    logger: Log
+    logger: Log,
+    jail?: JailConfiguration
 ): Promise<ServerInstallResult> {
     // Firejail is Linux-only; the platform arg is kept for signature compat.
     void platform;
@@ -106,6 +109,28 @@ export async function installCodeServer(
         customInstallPath,
         serverValidation: vscodeServerConfig.serverValidation,
     };
+
+    // Download the server on the host (which has networking) into the jail's
+    // data dir BEFORE running the jailed script. The jailed script then finds
+    // the server binary already present and skips its own download, so the jail
+    // can run with networking disabled (e.g. --net=none).
+    if (jail) {
+        try {
+            await downloadServerOnHost({
+                jail,
+                serverDownloadUrlTemplate: serverDownloadUrlTemplateFinal,
+                version: bestRelease.version,
+                commit: vscodeServerConfig.commit,
+                quality: vscodeServerConfig.quality,
+                release: bestRelease.build,
+                serverApplicationName: vscodeServerConfig.serverApplicationName,
+                serverDataFolderName: vscodeServerConfig.serverDataFolderName,
+                customInstallPath,
+            }, logger);
+        } catch (err) {
+            throw new ServerInstallError(`Host-side server download failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
 
     const installServerScript = generateBashInstallScript(installOptions);
     logger.trace('Server install command:', installServerScript);
@@ -202,8 +227,8 @@ DISTRO_VSCODIUM_RELEASE="${release ?? ''}"
 
 SERVER_APP_NAME="${serverApplicationName}"
 SERVER_INITIAL_EXTENSIONS="${extensions}"
-SERVER_LISTEN_FLAG="${useSocketPath ? `--socket-path="$TMP_DIR/vscode-server-sock-${crypto.randomUUID()}"` : '--port=0'}"
 SERVER_DATA_DIR="${serverDataDir}"
+SERVER_LISTEN_FLAG="${useSocketPath ? `--socket-path="$SERVER_DATA_DIR/.$DISTRO_COMMIT.sock"` : '--port=0'}"
 SERVER_DATA_DIR_FLAG="${customInstallPath ? '--server-data-dir="$SERVER_DATA_DIR"' : ''}"
 SERVER_DIR="$SERVER_DATA_DIR/bin/$DISTRO_COMMIT"
 SERVER_SCRIPT="$SERVER_DIR/bin/$SERVER_APP_NAME"
@@ -325,20 +350,44 @@ fi
 # PID namespace the backgrounded server gets a jail-local pid (e.g. 45) that is
 # meaningless to the next jail invocation, so a pid-based check always misses and
 # every attempt respawns + rewrites the token. Instead, treat a server as alive
-# if the log reports a listening port AND that port is actually accepting
-# connections on 127.0.0.1.
+# if the log reports a listening endpoint AND that endpoint is actually
+# accepting connections.
+#
+# The server listens either on a TCP port (--port=0) or a unix socket
+# (--socket-path=). The log line "Extension host agent listening on <X>" carries
+# a numeric port in the first case and a socket path in the second, so both
+# forms must be handled or socket-path servers are never detected as alive and
+# every resolve respawns a duplicate that collides on the socket (EADDRINUSE).
 SERVER_RUNNING=
 if [[ -f $SERVER_LOGFILE ]]; then
-    EXISTING_PORT="$(grep -oE 'Extension host agent listening on [0-9]+' $SERVER_LOGFILE 2>/dev/null | grep -oE '[0-9]+' | tail -1)"
-    if [[ -n $EXISTING_PORT ]]; then
-        # Probe the port to confirm the server is still up.
-        if command -v curl >/dev/null 2>&1; then
-            if curl --max-time 2 --silent --output /dev/null "http://127.0.0.1:$EXISTING_PORT/version"; then
+    EXISTING_LISTEN="$(grep -E 'Extension host agent listening on .+' $SERVER_LOGFILE 2>/dev/null | sed 's/.*Extension host agent listening on //' | tail -1)"
+    if [[ -n $EXISTING_LISTEN ]]; then
+        if [[ $EXISTING_LISTEN =~ ^[0-9]+$ ]]; then
+            # TCP port: probe it to confirm the server is still up.
+            EXISTING_PORT="$EXISTING_LISTEN"
+            if command -v curl >/dev/null 2>&1; then
+                if curl --max-time 2 --silent --output /dev/null "http://127.0.0.1:$EXISTING_PORT/version"; then
+                    SERVER_RUNNING=1
+                fi
+            elif (exec 3<>"/dev/tcp/127.0.0.1/$EXISTING_PORT") 2>/dev/null; then
+                exec 3>&- 3<&-
                 SERVER_RUNNING=1
             fi
-        elif (exec 3<>"/dev/tcp/127.0.0.1/$EXISTING_PORT") 2>/dev/null; then
-            exec 3>&- 3<&-
-            SERVER_RUNNING=1
+        else
+            # Unix socket: confirm the socket exists and is accepting connections.
+            # A stale socket file can linger after a crash, so probe it rather
+            # than trusting its mere presence.
+            if command -v curl >/dev/null 2>&1; then
+                if curl --max-time 2 --silent --output /dev/null --unix-socket "$EXISTING_LISTEN" "http://localhost/version"; then
+                    SERVER_RUNNING=1
+                fi
+            elif command -v nc >/dev/null 2>&1; then
+                if nc -z -U "$EXISTING_LISTEN" 2>/dev/null; then
+                    SERVER_RUNNING=1
+                fi
+            elif [[ -S $EXISTING_LISTEN ]]; then
+                SERVER_RUNNING=1
+            fi
         fi
     fi
 fi
@@ -357,10 +406,10 @@ if [[ -z $SERVER_RUNNING ]]; then
     $SERVER_SCRIPT --start-server --host=127.0.0.1 $SERVER_LISTEN_FLAG $SERVER_DATA_DIR_FLAG $SERVER_VALIDATION_FLAG $SERVER_INITIAL_EXTENSIONS --connection-token-file $SERVER_TOKENFILE --telemetry-level off --enable-remote-auto-shutdown --accept-server-license-terms &> $SERVER_LOGFILE &
     echo $! > $SERVER_PIDFILE
 else
-    # Reuse the live server. Do NOT rewrite the token file or the log; the port
-    # and token reported below must come from the instance that is actually
-    # listening, so the client connects with credentials that match.
-    echo "[phase] reusing running server on port $EXISTING_PORT" 1>&2
+    # Reuse the live server. Do NOT rewrite the token file or the log; the
+    # endpoint and token reported below must come from the instance that is
+    # actually listening, so the client connects with credentials that match.
+    echo "[phase] reusing running server on $EXISTING_LISTEN" 1>&2
 fi
 
 if [[ -f $SERVER_TOKENFILE ]]; then

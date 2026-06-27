@@ -137,6 +137,12 @@
 					"description": "Override the server binary name. Use only when your client has no matching server release.",
 					"scope": "application",
 					"default": ""
+				},
+				"firejail.useSocketPath": {
+					"type": "boolean",
+					"description": "Have the server listen on a Unix socket in the jail's private directory instead of a TCP port on 127.0.0.1. Enabled by default; lets jails run with no network namespace (e.g. --net=none).",
+					"scope": "application",
+					"default": true
 				}
 			}
 		},

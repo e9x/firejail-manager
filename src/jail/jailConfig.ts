@@ -131,7 +131,7 @@ export function defaultJail(name: string, privateDir: string): JailConfiguration
  * command to run inside the jail).
  */
 export function buildFirejailArgs(jail: JailConfiguration): string[] {
-    const args: string[] = [`--private=${untildify(jail.privateDir)}`];
+    const args: string[] = [`--name=${jail.name}`, `--private=${untildify(jail.privateDir)}`];
     if (jail.privateTmp) {
         args.push('--private-tmp');
     }
